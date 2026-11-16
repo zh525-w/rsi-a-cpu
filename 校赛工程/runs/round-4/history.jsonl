@@ -1,0 +1,10 @@
+{"stage_id": "round-4", "seed": 42, "epoch": 26, "step": 104, "loss": 0.10361795404531426, "validation": {"accuracy": 0.8842443729903537, "macro_f1": 0.7182721304563326}}
+{"stage_id": "round-4", "seed": 42, "epoch": 27, "step": 108, "loss": 0.10006501469776603, "validation": {"accuracy": 0.8778135048231511, "macro_f1": 0.7216654459729877}}
+{"stage_id": "round-4", "seed": 42, "epoch": 28, "step": 112, "loss": 0.0968840748420319, "validation": {"accuracy": 0.885048231511254, "macro_f1": 0.726366315676049}}
+{"stage_id": "round-4", "seed": 42, "epoch": 29, "step": 116, "loss": 0.09093744579054111, "validation": {"accuracy": 0.8842443729903537, "macro_f1": 0.7170782600555649}}
+{"stage_id": "round-4", "seed": 42, "epoch": 30, "step": 120, "loss": 0.09111564081768908, "validation": {"accuracy": 0.8778135048231511, "macro_f1": 0.7140926746052823}}
+{"stage_id": "round-4", "seed": 42, "epoch": 31, "step": 124, "loss": 0.08812435921944801, "validation": {"accuracy": 0.8754019292604501, "macro_f1": 0.720465499393292}}
+{"stage_id": "round-4", "seed": 42, "epoch": 32, "step": 128, "loss": 0.08165569261464152, "validation": {"accuracy": 0.885048231511254, "macro_f1": 0.726366315676049}}
+{"stage_id": "round-4", "seed": 42, "epoch": 33, "step": 132, "loss": 0.07990104936378356, "validation": {"accuracy": 0.8794212218649518, "macro_f1": 0.7227084743182236}}
+{"stage_id": "round-4", "seed": 42, "epoch": 34, "step": 136, "loss": 0.07600241639992043, "validation": {"accuracy": 0.885048231511254, "macro_f1": 0.726366315676049}}
+{"stage_id": "round-4", "seed": 42, "epoch": 35, "step": 140, "loss": 0.0750389793751089, "validation": {"accuracy": 0.8834405144694534, "macro_f1": 0.7181141553878866}}
