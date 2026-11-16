@@ -1,5 +1,0 @@
-{"stage_id": "round-3", "seed": 42, "epoch": 26, "step": 104, "loss": 0.10314827139197398, "validation": {"accuracy": 0.8802250803858521, "macro_f1": 0.7156581637303541}}
-{"stage_id": "round-3", "seed": 42, "epoch": 27, "step": 108, "loss": 0.09604289024249048, "validation": {"accuracy": 0.8794212218649518, "macro_f1": 0.7227084743182236}}
-{"stage_id": "round-3", "seed": 42, "epoch": 28, "step": 112, "loss": 0.08940219145494648, "validation": {"accuracy": 0.8834405144694534, "macro_f1": 0.7177488036419958}}
-{"stage_id": "round-3", "seed": 42, "epoch": 29, "step": 116, "loss": 0.08579840907566691, "validation": {"accuracy": 0.8794212218649518, "macro_f1": 0.715500188661908}}
-{"stage_id": "round-3", "seed": 42, "epoch": 30, "step": 120, "loss": 0.07823928948025181, "validation": {"accuracy": 0.8786173633440515, "macro_f1": 0.722550797035015}}

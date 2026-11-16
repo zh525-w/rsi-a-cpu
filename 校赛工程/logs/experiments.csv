@@ -1,9 +1,0 @@
-round,stage_id,parent_round,parent,parent_digest_ok,macro_f1_before,macro_f1_after,delta,steps_before,steps_after,epochs,learning_rate,batch_size,training_seconds,decision,note
-1,round-1,0,checkpoint.npz,True,0.714030,0.725782,+0.011752,80,100,5,0.003,128,0.0150,采纳,基线复现；链路与父检查点摘要核对通过
-2,round-2,1,checkpoint.npz,True,0.725782,0.717688,-0.008094,100,120,5,0.0015,128,0.0320,回滚,学习率降至 0.0015 后验证指标下降，低于上一轮
-3,round-3,1,checkpoint.npz,True,0.725782,0.722551,-0.003231,100,120,5,0.006,128,0.0160,回滚,
-4,round-4,1,checkpoint.npz,True,0.725782,0.718114,-0.007668,100,140,10,0.003,128,0.0320,回滚,
-5,round-5,1,checkpoint.npz,True,0.725782,0.726366,+0.000584,100,112,3,0.003,128,0.0160,采纳,从被采纳的 round-1 再走 3 epoch，检验 100 步是否已越过验证峰值
-6,round-6,5,checkpoint.npz,True,0.726366,0.714093,-0.012274,112,120,2,0.003,128,0.0150,回滚,在 112 步基础上再走 8 步，确认峰值是否就在这附近
-7,round-7,5,checkpoint.npz,True,0.726366,0.720465,-0.005901,112,124,3,0.003,128,0.0160,回滚,云端记录首轮：从被采纳检查点再走 3 epoch
-8,round-8,5,checkpoint.npz,True,0.726366,0.714093,-0.012274,112,120,2,0.003,128,0.0150,回滚,云端记录次轮：再走 8 步，检验峰值

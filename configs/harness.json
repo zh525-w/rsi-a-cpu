@@ -1,9 +1,9 @@
 {
   "decider": "preset",
-  "max_rounds": 8,
+  "max_rounds": 10,
   "max_wall_seconds": 1800,
   "token_budget": 200000,
-  "stop_after_rollback_streak": 4,
+  "stop_after_rollback_streak": 10,
   "thresholds": {
     "feature_score": 0.5,
     "label_tv": 0.15
@@ -75,6 +75,20 @@
       "lr": 0.003,
       "accept": false,
       "note": "云端记录次轮：再走 8 步，检验峰值"
+    },
+    {
+      "round": 9,
+      "epochs": 4,
+      "lr": 0.0025,
+      "accept": false,
+      "note": "平台 10 轮口径下的第 9 轮：步长回落到 0.0025，检验是否比 0.003 更稳"
+    },
+    {
+      "round": 10,
+      "epochs": 3,
+      "lr": 0.0035,
+      "accept": false,
+      "note": "第 10 轮：在 0.0025 与 0.006 之间取中间值复核，确认峰值区间"
     }
   ]
 }

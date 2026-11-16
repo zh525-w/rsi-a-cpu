@@ -2,17 +2,16 @@
 
 两种实现：
     PresetDecider —— 离线，按 configs/harness.json 里的预设脚本给决策，用于本地跑通链路。
-    LLMDecider    —— 通过 OpenAI 兼容接口调用平台模型（千问），只用标准库，不额外引依赖。
+    LLMDecider    —— 调用驱动大模型（正式评测走平台 model() 网关，本地可走 OpenAI 兼容端点），
+                     只用标准库，不额外引依赖。
 
-统一返回 dict：{"epochs": int|None, "lr": float|None, "batch": int|None,
-                "accept": bool, "note": str}
-返回 None 表示循环结束。
+Token 用量由 provider 返回、逐轮写进台账，不再固定写 0——否则「大模型 Token」这一项
+会被判成没调用大模型，与规则任务 2 直接冲突。
 """
 
 import json
-import os
-import urllib.error
-import urllib.request
+
+from harness.gateway import GatewayUnavailable, build_client
 
 
 class DecisionError(Exception):
@@ -55,9 +54,12 @@ class PresetDecider:
     """离线决策：按预设脚本逐轮下发，用尽即停止。"""
 
     name = "preset"
+    provider = "preset"
 
     def __init__(self, plan):
         self._plan = {int(item["round"]): item for item in plan}
+        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "provider": self.provider}
+        self.note = "离线预设脚本，不调用大模型"
 
     def decide(self, round_number, context):
         item = self._plan.get(round_number)
@@ -71,62 +73,46 @@ class PresetDecider:
 
 
 class LLMDecider:
-    """通过 OpenAI 兼容接口让平台模型给出决策。
+    """让大模型给出每轮决策。
 
-    需要的环境变量（都不写在代码里）：
-        PA_MODEL_BASE_URL   例如 https://xxx/v1
-        PA_MODEL_API_KEY    平台下发的 key
-        PA_MODEL_NAME       模型名，例如千问 3.8 27B 的平台标识
+    provider 由 harness.gateway 决定：正式评测用平台注入的 model() 网关，
+    本地调试可退到 PA_MODEL_BASE_URL 指向的 OpenAI 兼容端点。
     """
 
     name = "llm"
 
-    def __init__(self, base_url, api_key, model_name, price=None, timeout=60):
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model_name = model_name
+    def __init__(self, client, price=None, provider=None, note=""):
+        self.client = client
         self.price = price or {}
-        self.timeout = timeout
-        self.spent = 0.0
+        self.provider = provider or getattr(client, "provider", "unknown")
+        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "provider": self.provider}
+        self.note = note
 
     @classmethod
     def from_env(cls, config):
-        base = os.environ.get("PA_MODEL_BASE_URL", "")
-        key = os.environ.get("PA_MODEL_API_KEY", "")
-        name = os.environ.get("PA_MODEL_NAME", "")
-        if not (base and key and name):
-            return None
-        return cls(base, key, name, config.get("price"))
+        """返回 (decider, note)；没有可用 provider 时 decider 为 None，note 说明原因。"""
+        try:
+            client, provider, note = build_client(config)
+        except GatewayUnavailable as error:
+            return None, str(error)
+        if client is None:
+            return None, note
+        return cls(client, config.get("price"), provider, note), note
 
     def decide(self, round_number, context):
-        payload = {
-            "model": self.model_name,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(
-                    {"round": round_number, "history": context}, ensure_ascii=False)},
-            ],
-        }
-        request = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + self.api_key},
-            method="POST")
+        body = json.dumps({"round": round_number, "history": context}, ensure_ascii=False)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            raise DecisionError("模型接口返回 %d：%s" % (error.code, error.read()[:200]))
-        except urllib.error.URLError as error:
-            raise DecisionError("模型接口不可达：%s" % error.reason)
+            result = self.client.chat(SYSTEM_PROMPT, body)
+        except GatewayUnavailable as error:
+            raise DecisionError("模型调用失败：%s" % error)
 
-        usage = body.get("usage", {})
-        self.spent += self.charge(usage.get("prompt_tokens", 0),
-                                  usage.get("completion_tokens", 0))
+        self.last_usage = {
+            "prompt_tokens": getattr(result, "prompt_tokens", 0),
+            "completion_tokens": getattr(result, "completion_tokens", 0),
+            "provider": getattr(result, "provider", self.provider),
+        }
 
-        content = body["choices"][0]["message"]["content"].strip()
+        content = (result.content or "").strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             content = content[4:] if content.startswith("json") else content

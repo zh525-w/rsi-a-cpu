@@ -22,9 +22,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from harness import paths  # noqa: E402  （挂载点解析：/data /previous /model /output 优先）
+
 ROUNDS_PATH = ROOT / "configs" / "rounds.json"
-STATE_PATH = ROOT / "state.json"
-LOG_PATH = ROOT / "logs" / "experiments.csv"
 FIELDS = [
     "round", "stage_id", "parent_round", "parent", "parent_digest_ok",
     "macro_f1_before", "macro_f1_after", "delta", "steps_before", "steps_after",
@@ -41,14 +44,17 @@ def sha256_file(path):
 
 
 def load_state():
-    if not STATE_PATH.exists():
+    path = paths.state_path()
+    if not path.exists():
         return {"selected_round": 0, "selected_f1": None,
                 "selected_checkpoint": "checkpoint.npz"}
-    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def save_state(state):
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = paths.state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def load_round(number):
@@ -64,14 +70,15 @@ def load_round(number):
 def resolve_parent(state):
     selected = state["selected_round"]
     if selected == 0:
-        return 0, ROOT / "checkpoint.npz"
-    return selected, ROOT / "runs" / ("round-%d" % selected) / "checkpoint.npz"
+        return 0, paths.checkpoint_path()
+    return selected, paths.runs_dir() / ("round-%d" % selected) / "checkpoint.npz"
 
 
 def append_log(row):
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    exists = LOG_PATH.exists()
-    with open(LOG_PATH, "a", newline="", encoding="utf-8") as handle:
+    path = paths.logs_dir() / "experiments.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         if not exists:
             writer.writeheader()
@@ -97,7 +104,7 @@ def main():
     if not parent.exists():
         raise SystemExit("被采纳的检查点 %s 不存在" % parent)
 
-    output = ROOT / "runs" / ("round-%d" % number)
+    output = paths.runs_dir() / ("round-%d" % number)
     if output.exists():
         raise SystemExit("输出目录 %s 已存在；官方训练器不允许覆盖历史轮次" % output)
 
@@ -108,8 +115,8 @@ def main():
     cmd = [
         sys.executable, "-m", "baselines.train",
         "--profile", profile,
-        "--train", "public/train.jsonl",
-        "--validation", "public/validation.jsonl",
+        "--train", str(paths.train_path()),
+        "--validation", str(paths.validation_path()),
         "--from-baseline" if parent_round == 0 else "--resume", str(parent),
         "--epochs", str(epochs),
         "--output", str(output),
@@ -184,7 +191,7 @@ def main():
         nxt = load_state()["selected_round"]
         print("下一轮将从第 %s 轮继续，本轮目录保留作为失败证据" %
               ("基线" if nxt == 0 else str(nxt)))
-    print("记录已追加：" + str(LOG_PATH))
+    print("记录已追加：" + str(paths.logs_dir() / "experiments.csv"))
 
 
 if __name__ == "__main__":

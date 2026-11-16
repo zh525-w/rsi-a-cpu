@@ -31,6 +31,8 @@ COPY scripts ./scripts
 COPY harness ./harness
 COPY checkpoint.npz ./checkpoint.npz
 COPY baseline-info.json ./baseline-info.json
+# 适配层声明：describe 模式从这里读 schema / modes / adapter_source_ref
+COPY adapter_manifest.json ./adapter_manifest.json
 COPY TASK.md ./TASK.md
 COPY TRAINING_GUIDE.md ./TRAINING_GUIDE.md
 COPY README.md ./README.md

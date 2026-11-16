@@ -55,7 +55,7 @@ python -m baselines.predict --checkpoint runs/round-1/checkpoint.npz
 
 ## 四、轮次编排（规划十轮，实际执行八轮）
 
-`configs/rounds.json` 预置了十轮规划。**实际运行以 `configs/harness.json` 的 `max_rounds=8` 为准，第 9–10 轮没有运行**；已执行的 8 轮改动与指标见第九节与 `logs/experiments.csv`，本节的第 5–10 轮是当初的规划设想，其中部分改动（类别权重、label smoothing、温度校准等）并未落地。
+`configs/rounds.json` 预置了十轮规划。**本地台账的 8 轮是按 `max_rounds=8` 跑的；提交镜像内已改为 `max_rounds=10`，与规则「每个数据集 10 轮」一致**；已执行的 8 轮改动与指标见第九节与 `logs/experiments.csv`，本节的第 5–10 轮是当初的规划设想，其中部分改动（类别权重、label smoothing、温度校准等）并未落地。
 每轮只允许一个变量，`change` 字段就是本轮的改动声明。
 
 | 轮次 | 改动 | 目的 |
@@ -88,7 +88,7 @@ python -m baselines.predict --checkpoint runs/round-1/checkpoint.npz
 ## 六、目录
 
 ```
-configs/rounds.json      轮次编排与单轮改动声明（原始规划十轮；实际按 configs/harness.json 的 max_rounds=8 执行，第 9–10 轮未运行）
+configs/rounds.json      轮次编排与单轮改动声明（原始规划十轮；configs/harness.json 现取 max_rounds=10，与规则一致；已提交台账为 8 轮）
 scripts/run_round.py     轮次调度：定位父检查点、跑训练、写记录
 scripts/summarize.py     汇总日志，指出当前最佳
 scripts/run_harness.py   Harness 循环入口
@@ -210,7 +210,7 @@ sh docker/build.sh --save     # 产出 rsi-a-cpu-1.0.tar
 
 冷启动复现：镜像内不带 `logs/experiments.csv` 与 `runs/`，因此从第 1 轮起跑。本机目录里若已有八轮台账，想重跑冷启动，先把 `logs/experiments.csv` 与 `runs/` 移出去。
 
-`configs/harness.json` 的 `stop_after_rollback_streak` 取 4 而不是 3：预设脚本里第 2–4 轮是连续三次回滚，上限取 3 会在第 4 轮后停住、拿不到第 5 轮的峰值 0.726366；取 4 才能把八轮脚本走完，第 6/7/8 轮回滚后由轮次上限收尾。
+`configs/harness.json` 的 `stop_after_rollback_streak` 早期取 4（预设脚本第 2–4 轮连续三次回滚，上限取 3 会在第 4 轮后停住、拿不到第 5 轮的峰值 0.726366）。按十轮口径改为 10：预设第 2–4 轮、第 6–10 轮都在回滚，若仍取 4，第 9 轮前就熔断，等于没跑满十轮；取 10 让十轮规划全部走完，由轮次上限收尾。
 
 ## 十一、Harness 自循环
 
@@ -306,7 +306,7 @@ python scripts/run_harness.py --unattended
 | 系统性能不低于组委会静态基线 | 回滚机制 + `meets_static_baseline` 判定 | 满足（0.7264 vs 0.7140） |
 | 全部实验按《实验记录规范》留完整记录 | `logs/experiments.csv` + `logs/harness.jsonl` + SwanLab 云端 | 满足：8 轮本地台账 + 云端 run 已产出 |
 | 单位增益的算力消耗可核算 | 每轮 `wall_seconds`、累计时长、Token 与成本字段 | 字段就位，成本待回填单价 |
-| 驱动 Harness 的大模型须为 PyTRiO 模型或 Qwen3.8-27B | `harness/decide.py` 走 OpenAI 兼容接口，待填 endpoint | 待账号 |
+| 驱动 Harness 的大模型须为 PyTRiO 模型或 Qwen3.8-27B | `harness/gateway.py` 双 provider：正式评测走平台注入的 `model()` 网关，本地调试可退 OpenAI 兼容端点；Token 与成本逐轮入账 | 网关探测与记账已实现；模块名与签名待契约确认 |
 | 受控机制，防止无限制迭代 | 轮次／时长／Token／连续回滚四道上限 | 已实现 |
 | 提交模型配置与 Harness 系统镜像 | `docker/Dockerfile`（入口即 Harness），提交归档 `rsi-a-cpu-1.0-raw-8rounds.tar`（未压缩 docker save tar，189.7 MiB） | 已构建并通过结构 + 干净状态八轮冒烟；平台上传曾返回 502，待重传与真实 Docker 试运行验收 |
 | 提交系统运行说明文档 | 本 README | 已实现 |
@@ -328,3 +328,84 @@ python scripts/run_harness.py --unattended
 | 本队代码许可证 | — | 暂无指定开源许可证，默认保留所有权利；如需公开复用，可在此处补充 MIT / Apache-2.0 等条款 |
 
 图片、图标与第三方字体：本工程不含自制或引入的图形素材，产物只有数值检查点、JSON 与 Markdown。
+
+## 十四、工作区三模式与挂载点（契约适配层）
+
+平台在工作区契约 `contest.harness.workspace.v2` 下要求入口按 `describe / train / predict` 分派，并读写固定挂载点。本工程据此加了适配层，原有的本地用法完全保留。
+
+### 三个模式
+
+| 模式 | 命令 | 作用 | 写盘 |
+| --- | --- | --- | --- |
+| describe | `python scripts/run_harness.py describe` | 输出能力清单（任务/指标/类别/挂载点/轮次来源/入口/adapter_source_ref），供平台校验 | 只写 stdout，不落盘 |
+| train | `python scripts/run_harness.py train --unattended` | 五环闭环：漂移监测 → 诊断归因 → 实验优化 → 评估上线 → 回滚 | `runs/`、`logs/`、`results/`、`state.json` |
+| predict | `python scripts/run_harness.py predict` | 独立预测入口，逐行输出 `[[label, score], ...]` | 默认 `predictions.jsonl` |
+
+不带子命令时等价于 `train`，因此镜像里原有的 `CMD ["--unattended"]` 仍然可用。
+
+### 四个挂载点
+
+适配层只认挂载点，不再写死仓库内路径；目录不存在时回落到仓库根，所以同一份代码本地也能跑：
+
+| 挂载点 | 用途 | 本地回退 |
+| --- | --- | --- |
+| `/data` | `train.jsonl`、`validation.jsonl`、`test.jsonl` | `public/` |
+| `/previous` | 上一轮检查点与状态 | 仓库根 |
+| `/model` | 初始模型 / 基线权重 | `checkpoint.npz` |
+| `/output` | 本轮产物（`runs/`、`logs/`、`results/`、`state.json`） | 仓库根 |
+
+四者都可用环境变量覆盖（`HARNESS_DATA_DIR` 等），便于契约未下发前先做联调。
+
+### 轮次
+
+轮次**不写死**：优先级为 平台 `workspace_suite.rounds` ＞ 环境变量 `HARNESS_ROUNDS` ＞ 命令行 `--max-rounds` ＞ `configs/harness.json` ＞ 缺省 10。提交镜像内配置取 10，与规则「每个数据集 10 轮」一致；平台若下发 `workspace_suite.rounds`，以平台为准。
+
+### 大模型
+
+`harness/gateway.py` 提供两个 provider：
+
+- `PlatformGateway`：按 `HARNESS_GATEWAY_MODULES`（默认探测 `harness_runtime` / `workspace_runtime` / `platform_runtime` / `model_gateway` / `harness_gateway` / `rsi_runtime` 六个模块的 `model` / `chat` / `complete` / `invoke` / `generate` 属性）找到平台注入的 `model()` 网关；
+- `OpenAICompat`：`PA_MODEL_BASE_URL` + `PA_MODEL_API_KEY` + `PA_MODEL_NAME`，**仅本地调试**。
+
+两者都返回 Token 用量，`harness/loop.py` 逐轮累加并写进 `logs/harness.jsonl`（`prompt_tokens` / `completion_tokens` / `cost_cny`）与 `results/final.json`（`total_tokens` / `total_cost_cny`），不再固定为 0。
+
+找不到任何 provider 时**直接报错退出**，错误信息里列出试过的全部候选项，不静默退回、不伪造调用。
+
+### 本地自查
+
+```sh
+python scripts/run_harness.py describe           # 看能力清单
+python scripts/run_harness.py predict --limit 3  # 有 test.jsonl 时可用
+python scripts/run_harness.py train --unattended # 十轮闭环（preset）
+python scripts/selfcheck.py                      # 镜像自检 + 官方测试
+```
+
+适配层源码位置记录在 `adapter_manifest.json` 的 `adapter_source_ref` 字段（当前指向 `scripts/run_harness.py`）。该字段的取值形式待契约确认后可能调整。
+
+### 镜像内实测（2026-11-16）
+
+用 udocker（PRoot 引擎，免 root）装载 `rsi-a-cpu-1.0.tar` 后逐项执行，全部通过：
+
+```sh
+udocker load -i rsi-a-cpu-1.0.tar
+udocker run --rm --entrypoint=python rsi-a-cpu:1.0 scripts/selfcheck.py            # Python 3.10.11 / NumPy 1.26.4 / 15 数组 13235 元素 / 官方测试 OK
+udocker run --rm --entrypoint=python rsi-a-cpu:1.0 scripts/run_harness.py describe  # schema=contest.harness.workspace.v2，6 类，4326 参数，rounds=10
+udocker run --rm --entrypoint=python rsi-a-cpu:1.0 scripts/run_harness.py predict --input /app/public/validation.jsonl --limit 3 --output /tmp/p.jsonl
+udocker run --rm --entrypoint=python rsi-a-cpu:1.0 scripts/run_harness.py train --max-rounds 1 --dry-run
+```
+
+归档本身为 `docker save` 未压缩 tar 格式，198,922,240 B（约 190 MiB），6 层（5 层基础 + 1 层应用 68 MB），sha256 以 `949588b104aa0ac9` 开头。四个挂载点未挂载时回落到 `/app` 内路径，`describe` 的 `mounts` 字段会如实输出 `null`。
+
+### 预测协议（对齐官方基线包）
+
+官方基线包 `baselines/README.md` 写明：分类输出 `outputs:[{label,score}]`、回归输出 `outputs:{value}`，「与平台预测协议一致」。本工程 `predict` 默认输出该协议：
+
+```sh
+# 文件模式：读 /data/test.jsonl，写 /output/predictions.jsonl
+python scripts/run_harness.py predict
+
+# 管道模式：stdin 逐行读、stdout 逐行写（与 baselines/predict.py 的调用方式一致）
+echo '{"task":"classification","inputs":{"sensors":[...]}}' | python scripts/run_harness.py predict --input -
+```
+
+`--format pairs` 保留旧形状 `[[label, score], ...]` 仅供本地比对，正式评测不要用。
