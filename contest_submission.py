@@ -302,7 +302,8 @@ def train(rnd: Round):
     )
     log("候选已提交 artifact=%s" % submitted.get("artifact_id"))
 
-    state_dir = rnd.state_workspace(work / ("state-r%d" % rnd.round_index))
+    state_dir = unique_dir(work, "state-r%d" % rnd.round_index)
+    state_dir = rnd.state_workspace(state_dir)
     (state_dir / "round.json").write_text(json.dumps({
         "dataset_key": rnd.dataset_key,
         "round_index": rnd.round_index,
