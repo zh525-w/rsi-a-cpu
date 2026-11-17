@@ -1,0 +1,59 @@
+{
+  "schema": "contest.harness.workspace.v2",
+  "schema_status": "declared_target",
+  "team": "人工智能+",
+  "track": "A",
+  "task": "gas-sensor-drift-6class",
+  "metric": "macro_f1",
+  "entry": "scripts/run_harness.py",
+  "adapter_source_ref": "scripts/run_harness.py",
+  "adapter_modules": [
+    "harness/modes.py",
+    "harness/paths.py",
+    "harness/gateway.py",
+    "harness/loop.py",
+    "harness/decide.py",
+    "harness/monitor.py",
+    "harness/diagnose.py"
+  ],
+  "modes": {
+    "describe": {
+      "command": "python scripts/run_harness.py describe",
+      "writes": false,
+      "output": "stdout-json"
+    },
+    "train": {
+      "command": "python scripts/run_harness.py train --unattended",
+      "writes": ["/output/runs", "/output/logs", "/output/results", "/output/state.json"]
+    },
+    "predict": {
+      "command": "python scripts/run_harness.py predict",
+      "input": "/data/test.jsonl",
+      "output": "/output/predictions.jsonl",
+      "format": "{\"outputs\": [{\"label\": ..., \"score\": ...}]}（官方预测协议）",
+      "stdin": "支持 --input - 从 stdin 逐行读、逐行写 stdout"
+    }
+  },
+  "mounts": {
+    "data": "/data",
+    "previous": "/previous",
+    "model": "/model",
+    "output": "/output"
+  },
+  "rounds": {
+    "source": "workspace_suite.rounds",
+    "fallback": 10,
+    "note": "轮次由平台下发，镜像内不写死"
+  },
+  "model": {
+    "required": "PyTRiO 训练得到的模型，或 PyTRiO 的 Qwen3.8-27B",
+    "provider": "platform_gateway",
+    "provider_fallback": "openai_compat（仅本地调试，正式评测不可用）",
+    "max_parameters_b": 27
+  },
+  "runtime": {
+    "python": "3.10.11",
+    "dependencies": ["numpy==1.26.4"],
+    "cpu_threads": 1
+  }
+}

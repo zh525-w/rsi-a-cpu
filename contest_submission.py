@@ -4,6 +4,11 @@
 SDK 解帧后调用本文件的 train(rnd)。一轮只做一件事：读取父检查点，
 在公开训练集上续训一小步，用一次真实模型调用决定超参，提交候选并结束本轮。
 预测走 `python3 /app/harness.py predict`，逐行读 stdin、逐行写 stdout。
+
+三个数据集共用一套代码：
+- 特征按“路径”抽取，A 的扁平 features、B 的双轴嵌套特征、C 的 settings+sensors 都能量化；
+- 任务类型取 rnd.task，B/C 是回归（RUL），A 是分类；
+- 回归先归一化目标再训练，预测时反归一化并取非负，与官方 baseline 口径一致。
 """
 import json
 import os
@@ -21,6 +26,8 @@ TASKS = ("classification", "regression")
 PREDICT_ARGV = ["python3", "/app/harness.py", "predict"]
 DEFAULTS = {"learning_rate": 0.003, "epochs": 3}
 TOLERANCE = 1e-6
+TRAIN_CAP = 24000
+VALIDATION_CAP = 30000
 
 
 # ------------------------------------------------------------------ 小工具
@@ -97,6 +104,30 @@ def parse_paths(raw):
     return parsed
 
 
+def load_rows(iterator, cap, seed=42, label="train"):
+    """流式读取并做定长水库抽样：C 有 11 万行，全量入内存会顶到镜像内存上限。"""
+    rng = np.random.default_rng(seed)
+    rows = []
+    seen = 0
+    for row in iterator:
+        seen += 1
+        if len(rows) < cap:
+            rows.append(row)
+        else:
+            slot = int(rng.integers(0, seen))
+            if slot < cap:
+                rows[slot] = row
+    log("%s：读到 %d 行，保留 %d 行" % (label, seen, len(rows)))
+    return rows
+
+
+def matrix(rows, paths):
+    result = np.zeros((len(rows), len(paths)), dtype=np.float64)
+    for index, row in enumerate(rows):
+        result[index] = core.extract(row.get("inputs") or {}, paths)
+    return result
+
+
 def ask_decider(rnd, context):
     """每轮至少一次真实模型调用；解析失败时退回默认超参，调用号照样记入 finish。"""
     messages = [
@@ -124,27 +155,30 @@ def ask_decider(rnd, context):
 def train(rnd: Round):
     kind = task_kind(rnd.task)
     metric, direction = metric_info(rnd.task)
-    rows = list(rnd.data.training_rows())
-    validation = list(rnd.data.validation_rows())
-    log("dataset=%s round=%d task=%s metric=%s rows=%d validation=%d"
-        % (rnd.dataset_key, rnd.round_index, kind, metric, len(rows), len(validation)))
+    rows = load_rows(rnd.data.training_rows(), TRAIN_CAP, seed=42, label="训练集")
+    validation = load_rows(rnd.data.validation_rows(), VALIDATION_CAP, seed=43, label="验证集")
+    log("dataset=%s round=%d task=%s metric=%s(%s) rows=%d validation=%d"
+        % (rnd.dataset_key, rnd.round_index, kind, metric, direction, len(rows), len(validation)))
     if not rows:
         raise RuntimeError("公开训练集为空")
 
-    # 特征路径：优先沿用父检查点声明的路径（官方 baseline 就是 128 维扁平 features）
     parent_net, parent_meta, parent_name = load_parent(rnd)
     paths = parse_paths(parent_meta.get("paths")) if parent_meta else []
     if not paths or not usable(paths, rows):
-        paths = core.union_paths([row for row in rows[:64]], core.MAX_FEATURES)
+        paths = core.union_paths(rows[:200], core.MAX_FEATURES)
         log("父模型未给出可用路径，按本数据集 inputs 结构生成 %d 维特征" % len(paths))
 
-    x = core.matrix(rows, paths)
-    x_validation = core.matrix(validation, paths)
+    x = matrix(rows, paths)
+    x_validation = matrix(validation, paths)
 
     if kind == "regression":
         answers = np.asarray([float(row.get("answer", 0.0)) for row in rows], dtype=np.float64)
-        answers_validation = np.asarray([float(row.get("answer", 0.0)) for row in validation], dtype=np.float64)
+        answers_validation = np.asarray(
+            [float(row.get("answer", 0.0)) for row in validation], dtype=np.float64)
         classes = []
+        target_mean = float(answers.mean())
+        target_std = float(answers.std())
+        target_scale = target_std if target_std > 1e-9 else 1.0
     else:
         labels = sorted({str(row.get("answer")) for row in rows})
         parent_classes = list(parent_net.classes) if parent_net is not None else []
@@ -156,19 +190,19 @@ def train(rnd: Round):
         lookup = {label: index for index, label in enumerate(classes)}
         answers = np.asarray([lookup[str(row.get("answer"))] for row in rows], dtype=np.int64)
         answers_validation = np.asarray(
-            [lookup.get(str(row.get("answer")), 0) for row in validation], dtype=np.int64
-        )
+            [lookup.get(str(row.get("answer")), 0) for row in validation], dtype=np.int64)
+        target_mean, target_scale = 0.0, 1.0
 
     mean, scale = core.fit_scaler(x)
-    if parent_net is not None and parent_net.w1.shape[0] == x.shape[1]:
-        mean, scale = parent_net.mean, parent_net.scale
-    x_normalized = (x - mean) / scale
-    x_validation_normalized = (x_validation - mean) / scale
-
     inherited = can_inherit(parent_net, x, kind, classes, paths)
     if inherited:
+        mean, scale = parent_net.mean, parent_net.scale
+        if kind == "regression":
+            target_mean, target_scale = parent_net.target_mean, parent_net.target_scale
+
+    if inherited:
         net = parent_net
-        log("继承父模型 w1%s 参数 %d 个" % (tuple(net.w1.shape), core_parameter_count(net)))
+        log("继承父模型 w1%s，参数 %d 个" % (tuple(net.w1.shape), core_parameter_count(net)))
     else:
         net = core.Net(x.shape[1], out_dim=(len(classes) if kind == "classification" else 1),
                        kind=kind, seed=42)
@@ -176,22 +210,56 @@ def train(rnd: Round):
     net.mean, net.scale = mean, scale
     net.classes = classes
     net.paths = paths
+    net.target_mean, net.target_scale = target_mean, target_scale
 
-    parent_score = (core.score_rows(net, x_validation_normalized, answers_validation, classes, kind)
-                    if (inherited and validation) else None)
-    log("父模型验证分 %s" % parent_score)
+    parent_score = (core.score(net, x_validation, answers_validation, classes, kind, metric)
+                    if (inherited and len(validation)) else None)
+    log("父模型验证分 %s" % fmt(parent_score))
 
     context = (
         "数据集 %s，第 %d 轮；任务 %s，指标 %s（%s）；特征 %d 维；训练 %d 行，验证 %d 行；"
         "父模型当前验证分 %s。目标是在不超过 %s 秒内小幅续训并尽量提升该指标。"
         % (rnd.dataset_key, rnd.round_index, kind, metric, direction, x.shape[1],
-           len(rows), len(validation), parent_score, rnd.wall_seconds or 1800)
+           len(rows), len(validation), fmt(parent_score), rnd.wall_seconds or 1800)
     )
     receipt, choice = ask_decider(rnd, context)
 
-    net.fit(x_normalized, answers, epochs=choice["epochs"], learning_rate=choice["learning_rate"], seed=42)
-    candidate_score = core.score_rows(net, x_validation_normalized, answers_validation, classes, kind) if validation else None
-    log("候选验证分 %s（lr=%s epochs=%s）" % (candidate_score, choice["learning_rate"], choice["epochs"]))
+    # 连续回滚时自动降步长、减轮数，避免每轮重复同一个失败的配方
+    streak = rollback_streak(rnd)
+    # 逐轮步长阶梯：同一配方重复跑必然复现同一结果，阶梯让每轮都是一次不同尝试
+    ladder = (1.0, 0.7, 1.3, 0.5, 1.6, 0.9, 0.4, 1.1, 0.6, 0.8)
+    factor = ladder[(int(rnd.round_index) - 1) % len(ladder)]
+    choice["learning_rate"] = min(max(choice["learning_rate"] * factor, 1e-4), 0.02)
+    log("轮次步长阶梯 factor=%s → lr=%s" % (factor, choice["learning_rate"]))
+    if streak:
+        choice["learning_rate"] = max(choice["learning_rate"] * (0.6 ** streak), 1e-4)
+        choice["epochs"] = max(2, choice["epochs"] - streak)
+        log("连续回滚 %d 轮，本轮改用 lr=%s epochs=%d" % (streak, choice["learning_rate"], choice["epochs"]))
+
+    net.fit(x, answers, epochs=choice["epochs"], learning_rate=choice["learning_rate"],
+            batch_size=128, seed=42)
+    candidate_score = (core.score(net, x_validation, answers_validation, classes, kind, metric)
+                       if len(validation) else None)
+    log("候选验证分 %s（lr=%s epochs=%s）" % (fmt(candidate_score), choice["learning_rate"], choice["epochs"]))
+    origin = "继承父权重续训" if inherited else "从零初始化"
+
+    # 回归轮做双路探针：B 的官方权重在验证轴承上已过拟合，续训越训越差，
+    # 从零重训反而更好；C 则相反。两路各训一版，按验证分择优提交。
+    if kind == "regression" and inherited and len(validation):
+        probe_seed = 42 + 7 * int(rnd.round_index)          # 每轮换一个起点，避免重复同一版本
+        probe_epochs = choice["epochs"] + (int(rnd.round_index) % 3)
+        probe = core.Net(x.shape[1], out_dim=1, kind="regression", seed=probe_seed)
+        probe.mean, probe.scale = mean, scale
+        probe.paths = paths
+        probe.target_mean, probe.target_scale = target_mean, target_scale
+        probe.fit(x, answers, epochs=probe_epochs, learning_rate=choice["learning_rate"],
+                  batch_size=128, seed=probe_seed)
+        log("探针配置 seed=%d epochs=%d" % (probe_seed, probe_epochs))
+        probe_score = core.score(probe, x_validation, answers_validation, classes, kind, metric)
+        log("双路探针：从零初始化验证分 %s" % fmt(probe_score))
+        if better(probe_score, candidate_score, direction):
+            log("从零初始化的版本更优，改用该版本")
+            net, candidate_score, origin = probe, probe_score, "从零初始化（父权重在本数据集验证集上过拟合）"
 
     improved = is_improved(parent_score, candidate_score, direction)
 
@@ -214,7 +282,7 @@ def train(rnd: Round):
         metric, rnd.round_index, choice["learning_rate"], choice["epochs"], fmt(parent_score))
     change_summary = "从父检查点 %s 继续 Adam 训练 %d 轮（lr=%.4g），特征 %d 维，%s。" % (
         parent_name, choice["epochs"], choice["learning_rate"], x.shape[1],
-        "参数维度一致，直接继承父权重" if inherited else "维度不一致，按当前数据集重建权重")
+        origin)
     submitted = rnd.submit_candidate(
         candidate_dir,
         hypothesis=clip(hypothesis),
@@ -275,8 +343,8 @@ def predict(sample, model_dir):
     checkpoint = os.environ.get("CONTEST_ARTIFACT_PATH") or str(Path(model_dir) / "checkpoint.npz")
     net, _meta = core.Net.load(checkpoint)
     paths = net.paths or core.leaf_paths(sample.inputs)
-    vector = core.extract(sample.inputs, paths)
-    matrix_in = ((vector - net.mean) / net.scale)[None, :]
+    vector = core.extract(sample.inputs or {}, paths)
+    matrix_in = net.normalize(vector[None, :])
     if sample.task == "regression" or net.kind == "regression":
         value = float(net.predict(matrix_in)[0])
         return {"value": value if np.isfinite(value) else 0.0}
@@ -295,7 +363,7 @@ def predict(sample, model_dir):
 # ------------------------------------------------------------------ 内部助手
 def load_parent(rnd):
     names = list(rnd.parent.declared_paths())
-    candidates = [name for name in names if name.endswith(".npz")] or []
+    candidates = [name for name in names if name.endswith(".npz")]
     for name in candidates:
         try:
             path = rnd.parent.path(name)
@@ -336,6 +404,31 @@ def fmt(value):
     if value is None:
         return "N/A"
     return "%.6f" % value
+
+
+def better(left, right, direction):
+    if left is None:
+        return False
+    if right is None:
+        return True
+    if direction == "lower":
+        return left < right - TOLERANCE
+    return left > right + TOLERANCE
+
+
+def rollback_streak(rnd):
+    """统计连续“保留父模型”的轮数，用于自动衰减学习率。"""
+    count = 0
+    try:
+        for item in reversed(list(rnd.history())):
+            config = item.get("configuration") or {}
+            if str(config.get("selected")) == "parent":
+                count += 1
+            else:
+                break
+    except Exception:  # history 不可用时按 0 处理
+        return 0
+    return count
 
 
 def is_improved(parent_score, candidate_score, direction):
