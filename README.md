@@ -3,6 +3,47 @@
 本目录把官方训练包 `cpu-a-guide-20261110-v1` 原样接进来，外面加了一层轮次调度与记录埋点。
 用途对应校赛提交要求里的三项：可复现最小原型、项目源代码、系统运行说明。
 
+## 〇、平台入口（Harness SDK 1.0.2 契约）
+
+平台用 `contest.harness.workspace.v2` 协议驱动镜像，入口固定为 `/app/harness.py`（SDK 官方模板），
+真正的选手代码在 `/app/contest_submission.py`，只对外暴露两个函数：
+
+```text
+python3 /app/harness.py describe     # 一行 JSON：protocol / model_access / tasks
+python3 /app/harness.py train        # 平台从 stdin 写一帧 start，SDK 解帧后调用 train(rnd)
+python3 /app/harness.py predict      # 平台逐行写样本，本工程逐行回预测
+```
+
+- `train(rnd)`：读 `/data/*.jsonl` 公开投影与 `/previous` 父检查点，续训一小步，
+  **每轮至少一次真实模型调用**（`rnd.model()`，平台持有密钥与端点），
+  `rnd.submit_candidate()` 提交候选、`rnd.save_state()` 留状态、`rnd.finish()` 结束本轮。
+  平台共跑 10 轮，每轮一个独立进程；每轮只做一次“读历史—做实验—依结果决策”的完整动作。
+- `predict(sample, model_dir)`：检查点真实路径取 `CONTEST_ARTIFACT_PATH`，`/model` 是根目录；
+  分类返回 `[{"label","score"}]`（score∈[0,1]、标签唯一、最高分唯一），回归返回 `{"value": 非负数}`；
+  必须读完一行就写一行并 flush，stdout 只放协议 JSONL，日志一律 stderr（SDK 已做 stdout 隔离）。
+- 数据集 A/B/C 用同一套代码：特征按“路径”描述（如 `[["key","features"],["index",0]]`），
+  任意嵌套的 `inputs` 都能压平成向量；A 赛道直接沿用官方父检查点的 128 条路径与权重，B/C 按当前
+  `inputs` 结构生成路径。任务类型以 `rnd.task["task"]` 为准（classification / regression），
+  不拿数据集代号当任务类型。
+
+镜像内的对应位置：
+
+| 路径 | 内容 |
+| --- | --- |
+| `/app/harness.py` | SDK 入口模板 |
+| `/app/contest_submission.py` | `train(rnd)` / `predict(sample, model_dir)` |
+| `/app/contest_harness/` | SDK 1.0.2 本体（vendored，import 即可，无需 pip） |
+| `/app/rsi/core.py` | 路径化特征抽取 + MLP 分类/回归 |
+
+本地离线自查（不需要真实模型，用 JSONL 宿主替身）：
+
+```sh
+python3 -m unittest tests.test_sdk tests.test_contract_regressions tests.test_transport_regressions -v
+```
+
+> 说明：下面第十四节记录的是 SDK 到手**之前**自研适配层的形态（`scripts/run_harness.py` 三模式）。
+> 它已在 2026-11-17 被官方 SDK 入口取代，保留仅为过程留痕，平台侧不再使用。
+
 ## 一、环境
 
 已验证通过的组合：
@@ -329,7 +370,7 @@ python scripts/run_harness.py --unattended
 
 图片、图标与第三方字体：本工程不含自制或引入的图形素材，产物只有数值检查点、JSON 与 Markdown。
 
-## 十四、工作区三模式与挂载点（契约适配层）
+## 十四、工作区三模式与挂载点（历史：SDK 到手前的自研适配层）
 
 平台在工作区契约 `contest.harness.workspace.v2` 下要求入口按 `describe / train / predict` 分派，并读写固定挂载点。本工程据此加了适配层，原有的本地用法完全保留。
 
