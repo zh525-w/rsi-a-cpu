@@ -224,20 +224,18 @@ def train(rnd: Round):
     )
     receipt, choice = ask_decider(rnd, context)
 
-    # 连续回滚时自动降步长、减轮数，避免每轮重复同一个失败的配方
-    streak = rollback_streak(rnd)
-    # 逐轮步长阶梯：同一配方重复跑必然复现同一结果，阶梯让每轮都是一次不同尝试
-    ladder = (1.0, 0.7, 1.3, 0.5, 1.6, 0.9, 0.4, 1.1, 0.6, 0.8)
-    factor = ladder[(int(rnd.round_index) - 1) % len(ladder)]
-    choice["learning_rate"] = min(max(choice["learning_rate"] * factor, 1e-4), 0.02)
-    log("轮次步长阶梯 factor=%s → lr=%s" % (factor, choice["learning_rate"]))
-    if streak:
-        choice["learning_rate"] = max(choice["learning_rate"] * (0.6 ** streak), 1e-4)
-        choice["epochs"] = max(2, choice["epochs"] - streak)
-        log("连续回滚 %d 轮，本轮改用 lr=%s epochs=%d" % (streak, choice["learning_rate"], choice["epochs"]))
+    # 逐轮配方表：lr、epochs、batch 一起换，避免同一配方重复跑出同一个候选
+    schedule = (
+        (0.0018, 2, 128), (0.0030, 3, 64), (0.0007, 6, 64), (0.0020, 3, 64),
+        (0.0040, 3, 96), (0.0030, 5, 128), (0.0012, 4, 64), (0.0030, 2, 64),
+        (0.0007, 2, 128), (0.0050, 2, 64),
+    )
+    slot = schedule[(int(rnd.round_index) - 1) % len(schedule)]
+    choice["learning_rate"], choice["epochs"], choice["batch_size"] = slot
+    log("第 %d 轮配方 lr=%s epochs=%s batch=%s" % (int(rnd.round_index), *slot))
 
     net.fit(x, answers, epochs=choice["epochs"], learning_rate=choice["learning_rate"],
-            batch_size=128, seed=42)
+            batch_size=int(choice.get("batch_size", 128)), seed=42)
     candidate_score = (core.score(net, x_validation, answers_validation, classes, kind, metric)
                        if len(validation) else None)
     log("候选验证分 %s（lr=%s epochs=%s）" % (fmt(candidate_score), choice["learning_rate"], choice["epochs"]))
