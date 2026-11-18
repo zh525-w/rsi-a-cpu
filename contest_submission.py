@@ -121,42 +121,6 @@ def load_rows(iterator, cap, seed=42, label="train"):
     return rows
 
 
-def augment_pool(rows, validation, ratio=0.8, seed=42, stratified=True):
-    """把验证集的一部分并入训练池，其余留作诚实评估。
-
-    实测动机：A 赛道验证集与训练集的类别分布差异极大（Acetaldehyde 占训练 6.7%、
-    验证 8.8%），且验证样本与训练样本在该特征空间下不可分，纯训练集学不到这一类，
-    六类中该类 F1 长期为 0，把 Macro-F1 压在 0.7268。
-    把 80% 验证样本并入训练、保留 20% 作评估，留出集 Macro-F1 从 0.61 提升到 0.82。
-
-    划分按类别分层，避免稀有类（验证集仅 5 个的 Toluene）整类落进训练部分，
-    导致评估口径里出现“该类 F1 恒为 0”的假象。
-    """
-    if not validation or ratio <= 0:
-        return rows, validation, 0
-    if not stratified:
-        order = np.random.default_rng(seed).permutation(len(validation))
-        cut = int(round(len(validation) * float(ratio)))
-        fit_index, hold_index = order[:cut], order[cut:]
-    else:
-        rng = np.random.default_rng(seed)
-        groups = {}
-        for index, row in enumerate(validation):
-            groups.setdefault(str(row.get("answer")), []).append(index)
-        fit_index, hold_index = [], []
-        for key in sorted(groups):
-            members = groups[key]
-            shuffled = list(rng.permutation(members))
-            take = int(round(len(shuffled) * float(ratio)))
-            if len(shuffled) > 1:
-                take = min(max(take, 1), len(shuffled) - 1)
-            fit_index.extend(shuffled[:take])
-            hold_index.extend(shuffled[take:])
-    fit_part = [validation[i] for i in fit_index]
-    hold_part = [validation[i] for i in hold_index]
-    return rows + fit_part, hold_part, len(fit_part)
-
-
 def matrix(rows, paths):
     result = np.zeros((len(rows), len(paths)), dtype=np.float64)
     for index, row in enumerate(rows):
@@ -168,13 +132,15 @@ def ask_decider(rnd, context):
     """每轮至少一次真实模型调用；解析失败时退回默认超参，调用号照样记入 finish。"""
     messages = [
         {"role": "system", "content": "你是工业小模型的训练决策器。只回复一行 JSON，不要解释。"},
-        {"role": "user", "content": context + "\n请给出本轮的学习率和训练轮数，格式：{\"learning_rate\":0.003,\"epochs\":3}"},
+        {"role": "user", "content": context + "\n请给出本轮的学习率、训练轮数与批大小，只输出一行 JSON：{\"learning_rate\":0.003,\"epochs\":3,\"batch_size\":64}；请参照历史分数，给出与前几轮不同的一组配方。"},
     ]
     receipt = rnd.model(messages, max_tokens=min(96, rnd.max_output_tokens), temperature=0)
     text = receipt.text or ""
     log("decider call=%s reply=%s" % (receipt.call_id, text.strip()[:200]))
     match = re.search(r"\{.{0,200}?\}", text, re.S)
     chosen = dict(DEFAULTS)
+    chosen["batch_size"] = 64
+    ok = False
     if match:
         try:
             payload = json.loads(match.group(0))
@@ -182,9 +148,12 @@ def ask_decider(rnd, context):
             epochs = int(payload.get("epochs", DEFAULTS["epochs"]))
             chosen["learning_rate"] = min(max(rate, 1e-4), 0.02)
             chosen["epochs"] = min(max(epochs, 1), 8)
+            batch = int(payload.get("batch_size", 64))
+            chosen["batch_size"] = min(max(batch, 16), 256)
+            ok = True
         except (ValueError, TypeError, json.JSONDecodeError):
             pass
-    return receipt, chosen
+    return receipt, chosen, ok
 
 
 # ------------------------------------------------------------------ 训练一轮
@@ -193,10 +162,10 @@ def train(rnd: Round):
     metric, direction = metric_info(rnd.task)
     rows = load_rows(rnd.data.training_rows(), TRAIN_CAP, seed=42, label="训练集")
     validation = load_rows(rnd.data.validation_rows(), VALIDATION_CAP, seed=43, label="验证集")
-    rows, validation, merged = augment_pool(rows, validation, ratio=0.8, seed=44,
-                                             stratified=(kind == "classification"))
-    if merged:
-        log("验证集并入训练池 %d 行，留出评估 %d 行（十轮口径一致）" % (merged, len(validation)))
+    # 数据边界：训练只用 /data/train.jsonl；/data/validation.jsonl 只用于本轮评估，
+    # 不并入训练池、不参与梯度更新；归一化参数只在本轮训练集上拟合。
+    if not validation:
+        raise RuntimeError("公开验证集为空，无法与父模型比较")
     log("dataset=%s round=%d task=%s metric=%s(%s) rows=%d validation=%d"
         % (rnd.dataset_key, rnd.round_index, kind, metric, direction, len(rows), len(validation)))
     if not rows:
@@ -262,18 +231,30 @@ def train(rnd: Round):
         % (rnd.dataset_key, rnd.round_index, kind, metric, direction, x.shape[1],
            len(rows), len(validation), fmt(parent_score), rnd.wall_seconds or 1800)
     )
-    receipt, choice = ask_decider(rnd, context)
-
-    # 逐轮配方表：lr、epochs、batch 一起换，避免同一配方重复跑出同一个候选
-    schedule = (
-        (0.0018, 2, 128), (0.0030, 3, 64), (0.0007, 6, 64), (0.0020, 3, 64),
-        (0.0040, 3, 96), (0.0030, 5, 128), (0.0012, 4, 64), (0.0030, 2, 64),
-        (0.0007, 2, 128), (0.0030, 3, 128),
-    )
-    slot = schedule[(int(rnd.round_index) - 1) % len(schedule)]
-    choice["learning_rate"], choice["epochs"], choice["batch_size"] = slot
-    log("第 %d 轮配方 lr=%s epochs=%s batch=%s" % (int(rnd.round_index), *slot))
-
+    past = []
+    for item in (rnd.history() or [])[-5:]:
+        config = item.get("configuration") or {}
+        past.append("第 %s 轮 lr=%s epochs=%s 父分=%s 候选分=%s"
+                    % (item.get("round_index"), config.get("learning_rate"),
+                       config.get("epochs"), fmt(config.get("parent_score")),
+                       fmt(config.get("candidate_score"))))
+    if past:
+        context += "\n最近轮次：" + "；".join(past)
+    receipt, choice, decider_used = ask_decider(rnd, context)
+    if not decider_used:
+        # 仅当模型回复无法解析时才回退；日志里标明来源，不掩盖
+        fallback = (
+            (0.0018, 2, 128), (0.0030, 3, 64), (0.0007, 6, 64), (0.0020, 3, 64),
+            (0.0040, 3, 96), (0.0030, 5, 128), (0.0012, 4, 64), (0.0030, 2, 64),
+            (0.0007, 2, 128), (0.0030, 3, 128),
+        )
+        slot = fallback[(int(rnd.round_index) - 1) % len(fallback)]
+        choice["learning_rate"], choice["epochs"], choice["batch_size"] = slot
+        log("decider 回复无法解析，回退配方 lr=%s epochs=%s batch=%s（call=%s）"
+            % (slot[0], slot[1], slot[2], receipt.call_id))
+    log("第 %d 轮执行配方 lr=%s epochs=%s batch=%s，来源=%s"
+        % (int(rnd.round_index), choice["learning_rate"], choice["epochs"],
+           choice["batch_size"], "model" if decider_used else "fallback"))
     net.fit(x, answers, epochs=choice["epochs"], learning_rate=choice["learning_rate"],
             batch_size=int(choice.get("batch_size", 128)), seed=42)
     candidate_score = (core.score(net, x_validation, answers_validation, classes, kind, metric)
