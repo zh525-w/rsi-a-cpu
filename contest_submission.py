@@ -228,7 +228,7 @@ def train(rnd: Round):
     schedule = (
         (0.0018, 2, 128), (0.0030, 3, 64), (0.0007, 6, 64), (0.0020, 3, 64),
         (0.0040, 3, 96), (0.0030, 5, 128), (0.0012, 4, 64), (0.0030, 2, 64),
-        (0.0007, 2, 128), (0.0050, 2, 64),
+        (0.0007, 2, 128), (0.0030, 3, 128),
     )
     slot = schedule[(int(rnd.round_index) - 1) % len(schedule)]
     choice["learning_rate"], choice["epochs"], choice["batch_size"] = slot
